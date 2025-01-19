@@ -17,28 +17,29 @@ use bevy_egui::{egui, EguiContexts, EguiPlugin};
 
 use bevy::{
     color::palettes::css::*,
-    pbr::wireframe::{NoWireframe, Wireframe, WireframeColor, WireframeConfig, WireframePlugin},
 };
-
+use bevy::pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline, OpaqueRendererMethod};
 use bevy::picking::pointer::PointerInteraction;
+use bevy::render::camera::ScalingMode;
+use bevy::render::mesh::{MeshVertexAttribute, MeshVertexBufferLayoutRef};
+use bevy::render::render_resource::{AsBindGroup, RenderPipelineDescriptor, ShaderRef, SpecializedMeshPipelineError, VertexFormat};
 //use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
-use crate::hexgrid::{HexCoordinate, HexGrid, OffsetCoordinate};
+use crate::hexgrid::{HexGrid, OffsetCoordinate};
 
 // Define a "marker" component to mark the custom mesh. Marker components are often used in Bevy for
 // filtering entities in queries with `With`, they're usually not queried directly since they don't
 // contain information within them.
-#[derive(Component)]
-struct CustomUV;
 
 fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins,
             MeshPickingPlugin,
-            EguiPlugin
+            EguiPlugin,
+            MaterialPlugin::<ExtendedMaterial<StandardMaterial, HexTerrainExtension>,>::default()
         ))
         .add_systems(Startup, setup)
-        .add_systems(Update, (input_handler, ui_system))
+        .add_systems(Update, (create_map, input_handler, ui_system))
         .insert_resource(SelectedTile(None))
         .insert_resource(HexGrid::new(50, 25))
         .run();
@@ -53,30 +54,19 @@ struct LoadingTexture {
 fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    grid: Res<HexGrid>
+    //mut materials2: ResMut<Assets<ExtendedMaterial<StandardMaterial, HexTerrainExtension>>>,
+    //mut materials: ResMut<Assets<StandardMaterial>>,
+    //mut images: ResMut<Assets<Image>>,
+    //mut meshes: ResMut<Assets<Mesh>>,
+    //grid: Res<HexGrid>
 ) {
+    // let test_grid = grid;
+    // let hex_mesh_handle: Handle<Mesh> = meshes.add(test_grid.triangulate_grid());
+    commands.insert_resource(LoadingTexture {
+        is_loaded: false,
+        handle: asset_server.load("textures/array_texture.png"),
+    });
 
-    // Import the custom texture.
-    // let custom_texture_handle: Handle<Image> = asset_server
-    //     .load_with_settings("textures/Tex1.png",
-    //                         |s: &mut _| {
-    //                             *s = ImageLoaderSettings {
-    //                                 sampler: ImageSampler::Descriptor(ImageSamplerDescriptor {
-    //                                     // rewriting mode to repeat image,
-    //                                     address_mode_u: ImageAddressMode::Repeat,
-    //                                     address_mode_v: ImageAddressMode::Repeat,
-    //                                     ..default()
-    //                                 }),
-    //                                 ..default()
-    //                             }
-    //                         },
-    //     );
-
-
-    let test_grid = grid;
-    let hex_mesh_handle: Handle<Mesh> = meshes.add(test_grid.triangulate_grid());
     //Render the mesh with the custom texture, and add the marker.
     // commands.spawn((
     //     Mesh3d(hex_mesh_handle),
@@ -89,52 +79,93 @@ fn setup(
     //     CustomUV,
     // ));
 
-    commands
-        .spawn((
-            Mesh3d(hex_mesh_handle),
-            MeshMaterial3d(materials.add(Color::srgb(1.0, 1.0, 1.0))),
-            Wireframe,
-            CustomUV,
-        ))
-        .observe(clicked_map);
 
     // commands
     //     .spawn((
     //         Mesh3d(hex_mesh_handle),
-    //         MeshMaterial3d(materials.add(HexTerrainMaterial {
-    //             color_texture: Some(asset_server.load("textures/Tex1.png")),
-    //             alpha_mode: AlphaMode::Blend
+    //         MeshMaterial3d(materials.add(StandardMaterial {
+    //             base_color: Color::srgb(1.0, 1.0, 1.0),
+    //             reflectance: 0.1,
+    //             perceptual_roughness: 0.9,
+    //             ..default()
     //         })),
-    //         Wireframe,
     //         CustomUV,
     //     ))
     //     .observe(clicked_map);
 
     // Transform for the camera and lighting, looking at (0,0,0) (the position of the mesh).
     let camera_transform =
-        Transform::from_xyz(0.0, 120.0, 120.0).looking_at(Vec3::ZERO, Vec3::Y);
+        Transform::from_xyz(0.0, 100.0, 160.0).looking_at(Vec3::ZERO, Vec3::Y);
 
     let light_transform =
-        Transform::from_xyz(40.0, 5.0, 40.0).looking_at(Vec3::ZERO, Vec3::Y);
+        Transform::from_xyz(40.0, 5.0, -40.0).looking_at(Vec3::ZERO, Vec3::Y);
 
     // Camera in 3D space.
-    commands.spawn((Camera3d::default(), camera_transform));
+    commands.spawn((
+        Camera3d::default(),
+        Projection::from(OrthographicProjection {
+            // 6 world units per pixel of window height.
+            scaling_mode: ScalingMode::FixedVertical {
+                viewport_height: 100.0,
+            },
+            ..OrthographicProjection::default_3d()
+        }),
+        camera_transform
+    ));
 
     // Light up the scene.
     commands.spawn((DirectionalLight::default(), light_transform));
-
-    // Text to describe the controls.
-    // commands.spawn((
-    //     Text::new("Controls:\nSpace: Change UVs\nX/Y/Z: Rotate\nR: Reset orientation"),
-    //     Node {
-    //         position_type: PositionType::Absolute,
-    //         top: Val::Px(12.0),
-    //         left: Val::Px(12.0),
-    //         ..default()
-    //     },
-    // ));
 }
 
+
+fn create_map(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut loading_texture: ResMut<LoadingTexture>,
+    mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, HexTerrainExtension>>>,
+    grid: Res<HexGrid>
+) {
+    if loading_texture.is_loaded
+        || !asset_server
+        .load_state(loading_texture.handle.id())
+        .is_loaded()
+    {
+        return;
+    }
+    loading_texture.is_loaded = true;
+    let image = images.get_mut(&loading_texture.handle).unwrap();
+
+    // Create a new array texture asset from the loaded texture.
+    let array_layers = 4;
+    image.reinterpret_stacked_2d_as_array(array_layers);
+
+    let test_grid = grid;
+    let hex_mesh_handle: Handle<Mesh> = meshes.add(test_grid.triangulate_grid());
+
+    let material_handle: Handle<ExtendedMaterial<StandardMaterial, HexTerrainExtension>> = materials.add({
+        ExtendedMaterial{
+            base: StandardMaterial {
+                base_color: WHITE.into(),
+                opaque_render_method: OpaqueRendererMethod::Auto,
+                reflectance: 0.1,
+                perceptual_roughness: 0.9,
+                ..Default::default()
+            },
+            extension: HexTerrainExtension {
+                array_texture: loading_texture.handle.clone(),
+            }
+        }
+    });
+
+    commands.spawn((
+        Mesh3d(hex_mesh_handle.clone()),
+        MeshMaterial3d(material_handle.clone()),
+
+    ))
+    .observe(clicked_map);
+}
 
 // System to receive input from the user,
 // check out examples/input/ for more examples about user input.
@@ -145,21 +176,6 @@ fn input_handler(
     mut query: Query<&mut Transform, With<Camera3d>>,
     time: Res<Time>,
 ) {
-    // if keyboard_input.pressed(KeyCode::KeyX) {
-    //     for mut transform in &mut query {
-    //         transform.rotate_x(time.delta_secs() / 1.2);
-    //     }
-    // }
-    // if keyboard_input.pressed(KeyCode::KeyY) {
-    //     for mut transform in &mut query {
-    //         transform.rotate_y(time.delta_secs() / 1.2);
-    //     }
-    // }
-    // if keyboard_input.pressed(KeyCode::KeyZ) {
-    //     for mut transform in &mut query {
-    //         transform.rotate_z(time.delta_secs() / 1.2);
-    //     }
-    // }
     if keyboard_input.pressed(KeyCode::KeyW) {
         for mut transform in &mut query {
             transform.translation -= Vec3::Z*(60.0*time.delta_secs() / 1.2);
@@ -213,7 +229,8 @@ fn ui_system(
     mut commands: Commands,
     query: Query<Entity, With<Mesh3d>>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<ExtendedMaterial<StandardMaterial, HexTerrainExtension>>>,
+    mut loading_texture: ResMut<LoadingTexture>,
 ) {
     //NE: 0
     // W: 1
@@ -267,20 +284,75 @@ fn ui_system(
     });
 
     if changed {
-        println!("Change!");
         for entity in query.iter() {
             commands.entity(entity).despawn();
             let hex_mesh_handle: Handle<Mesh> = meshes.add(grid.triangulate_grid());
 
+            let material_handle: Handle<ExtendedMaterial<StandardMaterial, HexTerrainExtension>> = materials.add({
+                ExtendedMaterial{
+                    base: StandardMaterial {
+                        base_color: WHITE.into(),
+                        opaque_render_method: OpaqueRendererMethod::Auto,
+                        reflectance: 0.1,
+                        perceptual_roughness: 0.9,
+                        ..Default::default()
+                    },
+                    extension: HexTerrainExtension {
+                        array_texture: loading_texture.handle.clone(),
+                    }
+                }
+            });
 
-            commands
-                .spawn((
-                    Mesh3d(hex_mesh_handle),
-                    MeshMaterial3d(materials.add(Color::srgb(1.0, 1.0, 1.0))),
-                    Wireframe,
-                    CustomUV,
-                ))
+            commands.spawn((
+                Mesh3d(hex_mesh_handle.clone()),
+                MeshMaterial3d(material_handle.clone()),
+            ))
                 .observe(clicked_map);
         }
+    }
+}
+
+const ATTRIBUTE_TEXTURE_INDEX: MeshVertexAttribute =
+    MeshVertexAttribute::new("TextureIndex", 988540917, VertexFormat::Uint32x3 );
+
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+struct HexTerrainExtension {
+    // We need to ensure that the bindings of the base material and the extension do not conflict,
+    // so we start from binding slot 100, leaving slots 0-99 for the base material.
+    #[texture(100, dimension = "2d_array")]
+    #[sampler(101)]
+    array_texture: Handle<Image>,
+}
+
+impl MaterialExtension for HexTerrainExtension {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/hex_terrain_vertex.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "shaders/hex_terrain_fragment.wgsl".into()
+    }
+
+    fn deferred_fragment_shader() -> ShaderRef {
+        "shaders/hex_terrain_fragment.wgsl".into()
+    }
+
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // layout.0.get_layout(attribute_descriptors);
+        let vertex_layout = layout.0.get_layout(&[
+            Mesh::ATTRIBUTE_POSITION.at_shader_location(0),
+            Mesh::ATTRIBUTE_NORMAL.at_shader_location(1),
+            Mesh::ATTRIBUTE_UV_0.at_shader_location(2),
+            // Mesh::ATTRIBUTE_TANGENT.at_shader_location(3),
+            Mesh::ATTRIBUTE_COLOR.at_shader_location(5),
+            ATTRIBUTE_TEXTURE_INDEX.at_shader_location(8),
+        ])?;
+        descriptor.vertex.buffers = vec![vertex_layout];
+
+        Ok(())
     }
 }

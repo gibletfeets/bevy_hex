@@ -1,10 +1,9 @@
 use bevy::asset::RenderAssetUsages;
-use bevy::color::Color;
 use bevy::math::{UVec3, Vec2, Vec3};
 use bevy::prelude::{Resource, Mesh};
 use bevy::render::mesh::{Indices, PrimitiveTopology};
-use bevy::render::render_resource::ShaderType;
 use rand::random;
+use crate::ATTRIBUTE_TEXTURE_INDEX;
 
 //TODO: REPLACE WITH ENUM, SET UP THINGS TO INDEX WITH THIS
 //NE: 0
@@ -135,7 +134,8 @@ struct HexMeshData{
     vertices: Vec<Vec3>,
     colors: Vec<[f32; 4]>,
     vert_terrain: Vec<UVec3>,
-    triangles: Vec<u32>
+    triangles: Vec<u32>,
+    normals: Vec<Vec3>
 }
 
 #[derive(Resource)]
@@ -222,7 +222,11 @@ impl HexGrid {
         );
         let height_refs = HexGrid::get_height_refs(_x, _z, cell_count_x, cell_count_z);
         let neighbor_cell_refs = [None; 6];
-        let terrain = 0;
+        let terrain = if random::<f32>() > 0.5 {
+            0
+        } else {
+            1
+        };
         HexCell{
             position,
             height_refs,
@@ -246,8 +250,8 @@ impl HexGrid {
         K/(n.dot(v-x)*m.dot(v-x))
     }
 
-    fn calc_height(&self, _x: Vec3, cell: &HexCell) -> f32 {
-        let x = Vec2::new(_x.x - cell.position.x, _x.z - cell.position.z);
+    fn calc_height(&self, v: Vec3, cell: &HexCell) -> f32 {
+        let x = Vec2::new(v.x - cell.position.x, v.z - cell.position.z);
         let mut sum = 0.0;
         let mut height = 0.0;
         for i in 0..6 {
@@ -260,11 +264,21 @@ impl HexGrid {
             sum += weight;
 
             let (height_x, height_z) = cell.height_refs[i];
-            //println!("x: {height_x}, z: {height_z}");
-            //println!("{weight}");
             height += self.heights[height_x][height_z] as f32 * weight;
         }
-        Self::curve((height/sum))*(OUTER_RADIUS/4.0)
+        Self::curve(height/sum)*(OUTER_RADIUS/4.0)
+    }
+
+    fn calc_normal(&self, v: Vec3, height: f32, cell: &HexCell) -> Vec3 {
+        const EPS: f32 = 0.001;
+        let dx = self.calc_height(v+Vec3::X*EPS, cell) - height;
+        let dz = self.calc_height(v+Vec3::Z*EPS, cell) - height;
+        Vec3::new(dx/EPS, 1.0, dz/EPS).normalize()
+    }
+
+    fn calc_height_and_normal(&self, x: Vec3, cell: &HexCell) -> (f32, Vec3) {
+        let height = self.calc_height(x, cell);
+        (height, self.calc_normal(x, height, cell))
     }
 
     pub fn triangulate_grid(&self) -> Mesh {
@@ -272,7 +286,8 @@ impl HexGrid {
             vertices: vec![],
             colors: vec![],
             vert_terrain: vec![],
-            triangles: vec![]
+            triangles: vec![],
+            normals: vec![]
         };
         for cell in self.cells.iter().flatten() {
             self.triangulate_cell(
@@ -293,15 +308,19 @@ impl HexGrid {
                 Mesh::ATTRIBUTE_COLOR,
                 data.colors
             )
-            // .with_inserted_attribute(
-            //     ATTRIBUTE_TEXTURE_INDEX,
-            //     data.vert_terrain
-            // )
+            .with_inserted_attribute(
+                Mesh::ATTRIBUTE_NORMAL,
+                data.normals
+            )
+            .with_inserted_attribute(
+                ATTRIBUTE_TEXTURE_INDEX,
+                data.vert_terrain
+            )
             .with_inserted_indices(
                 //TODO: fix backwards winding order
                 Indices::U32(data.triangles.into_iter().rev().collect::<Vec<u32>>())
             )
-            .with_computed_smooth_normals()
+            //.with_computed_smooth_normals()
     }
 
     fn triangulate_cell(
@@ -320,7 +339,9 @@ impl HexGrid {
                 data
             );
             for vertex in &mut data.vertices[vert_idx_pre_tri..] {
-                vertex.y = self.calc_height(vertex.clone(), cell);
+                let (h, n) = self.calc_height_and_normal(*vertex, cell);
+                vertex.y = h;
+                data.normals.push(n);
             }
             if dir <= SE {
                 let e = EdgeVertices::new(
@@ -418,9 +439,13 @@ impl HexGrid {
                 let vert_idx = data.vertices.len();
                 for (idx, vertex) in &mut data.vertices[(vert_idx-12)..].iter_mut().enumerate() {
                     if idx%4 < 2 {
-                        vertex.y = self.calc_height(vertex.clone(), cell);
+                        let (h, n) = self.calc_height_and_normal(*vertex, cell);
+                        vertex.y = h;
+                        data.normals.push(n);
                     } else {
-                        vertex.y = self.calc_height(vertex.clone(), neighbor);
+                        let (h, n) = self.calc_height_and_normal(*vertex, neighbor);
+                        vertex.y = h;
+                        data.normals.push(n);
                     }
                 }
                 //TODO - this triangle is getting made more times than it needs to be. Investigate.
@@ -430,12 +455,20 @@ impl HexGrid {
                         let next_neighbor = &self.cells[x][z];
                         let bridge = (HEX_CORNERS[next_dir] + HEX_CORNERS[next_dir+1])*BLEND_FACTOR;
                         let vert_idx = data.vertices.len();
-                        data.vertices.append(&mut vec![
-                            e1.v4, e2.v4, e1.v4.clone() + bridge
-                        ]);
-                        data.vertices[vert_idx].y = self.calc_height(data.vertices[vert_idx], cell);
-                        data.vertices[vert_idx+1].y = self.calc_height(data.vertices[vert_idx+1], neighbor);
-                        data.vertices[vert_idx+2].y = self.calc_height(data.vertices[vert_idx+2], next_neighbor);
+
+                        [e1.v4, e2.v4, e1.v4.clone() + bridge]
+                            .into_iter()
+                            .zip(
+                                [cell, neighbor, next_neighbor]
+                                    .into_iter()
+                            )
+                            .for_each(|(v, c)| {
+                                let (h, n) = self.calc_height_and_normal(v, c);
+                                data.vertices.push(Vec3::new(v.x, h, v.z));
+                                data.normals.push(n);
+                            });
+
+                        //data
 
                         let vert_idx = vert_idx as u32;
                         data.triangles.append(&mut vec![vert_idx, vert_idx + 2, vert_idx + 1]);
